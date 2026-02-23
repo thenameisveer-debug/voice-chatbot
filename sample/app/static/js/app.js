@@ -100,19 +100,6 @@ function sendWS(obj) {
   }
 }
 
-// ── ADK Event handling ─────────────────────────────────────────────────────
-// ADK events are raw model_dump_json output. Key fields:
-//   adkEvent.turnComplete               → boolean, turn is done
-//   adkEvent.interrupted                → boolean, agent was interrupted
-//   adkEvent.inputTranscription.text    → user speech → text
-//   adkEvent.inputTranscription.finished → boolean
-//   adkEvent.outputTranscription.text   → agent speech → text
-//   adkEvent.outputTranscription.finished → boolean
-//   adkEvent.content.parts[]            → array of text/audio parts
-//     part.text                         → text string
-//     part.inlineData.data              → base64 PCM audio
-//     part.inlineData.mimeType          → "audio/pcm;rate=24000"
-
 function handleADKEvent(adkEvent) {
   console.log("[ADK]", JSON.stringify(adkEvent).slice(0, 120));
 

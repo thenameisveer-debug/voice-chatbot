@@ -5,7 +5,6 @@ Run with: uvicorn app.main:app --reload
 """
 
 import asyncio
-import base64
 import json
 import os
 import uuid

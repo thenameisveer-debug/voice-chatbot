@@ -36,7 +36,7 @@ async def test_live():
     event_count = 0
 
     async with client.aio.live.connect(model=model, config=config) as session:
-        print("✅ Connected!\n")
+        print(" Connected!\n")
 
         # ✅ FIX: Use send_client_content instead of deprecated session.send()
         await session.send_client_content(
@@ -46,13 +46,13 @@ async def test_live():
             ),
             turn_complete=True,
         )
-        print("✅ Sent text message, waiting for response...\n")
+        print("Sent text message, waiting for response...\n")
 
         async def receive():
             nonlocal event_count
             async for response in session.receive():
                 event_count += 1
-                print(f"📨 Event #{event_count}: {type(response).__name__}")
+                print(f" Event #{event_count}: {type(response).__name__}")
 
                 if hasattr(response, "server_content") and response.server_content:
                     sc = response.server_content
@@ -61,17 +61,17 @@ async def test_live():
                         t = sc.output_transcription
                         text = getattr(t, "text", "") or ""
                         if text and text != "None":
-                            print(f"   ✅ Agent transcript: '{text}'")
+                            print(f"   Agent transcript: '{text}'")
 
                     if hasattr(sc, "model_turn") and sc.model_turn:
                         for part in sc.model_turn.parts:
                             if hasattr(part, "text") and part.text:
-                                print(f"   ✅ Text: {part.text}")
+                                print(f"   Text: {part.text}")
                             if hasattr(part, "inline_data") and part.inline_data:
-                                print(f"   ✅ Audio: {len(part.inline_data.data)} bytes")
+                                print(f"   Audio: {len(part.inline_data.data)} bytes")
 
                     if getattr(sc, "turn_complete", False):
-                        print(f"\n✅ TURN COMPLETE — Gemini Live is working!")
+                        print(f"\n TURN COMPLETE — Gemini Live is working!")
                         return
 
                 if event_count >= 30:
@@ -81,9 +81,9 @@ async def test_live():
         try:
             await asyncio.wait_for(receive(), timeout=15.0)
         except asyncio.TimeoutError:
-            print(f"\n⏰ Timeout — {event_count} events received")
+            print(f"\n Timeout — {event_count} events received")
             if event_count == 0:
-                print("❌ Zero events — model not responding")
+                print(" Zero events — model not responding")
 
     print(f"\nDone. Total events: {event_count}")
 
@@ -148,28 +148,28 @@ async def test_adk():
                 run_config=run_config,
             ):
                 event_count += 1
-                print(f"  📨 ADK Event #{event_count}: {type(event).__name__}")
+                print(f"   ADK Event #{event_count}: {type(event).__name__}")
 
                 # ADK wraps responses differently — check both access patterns
                 sc = None
                 if hasattr(event, "server_content") and event.server_content:
                     sc = event.server_content
                 elif hasattr(event, "content") and event.content:
-                    print(f"     📄 Content role: {getattr(event.content, 'role', '?')}")
+                    print(f"     Content role: {getattr(event.content, 'role', '?')}")
 
                 if sc:
                     if hasattr(sc, "output_transcription") and sc.output_transcription:
                         text = getattr(sc.output_transcription, "text", "") or ""
                         if text and text != "None":
-                            print(f"     ✅ Agent transcript: '{text}'")
+                            print(f"    Agent transcript: '{text}'")
                     if hasattr(sc, "model_turn") and sc.model_turn:
                         for part in sc.model_turn.parts:
                             if hasattr(part, "inline_data") and part.inline_data:
-                                print(f"     ✅ Audio: {len(part.inline_data.data)} bytes")
+                                print(f"     Audio: {len(part.inline_data.data)} bytes")
                             if hasattr(part, "text") and part.text:
-                                print(f"     ✅ Text: {part.text}")
+                                print(f"      Text: {part.text}")
                     if getattr(sc, "turn_complete", False):
-                        print(f"     ✅ ADK TURN COMPLETE — pipeline works!")
+                        print(f"      ADK TURN COMPLETE — pipeline works!")
                         live_queue.close()
                         return
 
@@ -180,11 +180,11 @@ async def test_adk():
             # ADK incorrectly raises this as an exception when live_queue.close()
             # triggers a clean shutdown. Safe to treat as success.
             if "1000" in err_str:
-                print(f"  ✅ Session closed normally (WS 1000 = OK) — {event_count} events received")
+                print(f" Session closed normally (WS 1000 = OK) — {event_count} events received")
                 if event_count == 0:
-                    print("  ⚠️  No events before close — try increasing sender sleep time")
+                    print("No events before close — try increasing sender sleep time")
             else:
-                print(f"  ❌ Unexpected ADK error: {e}")
+                print(f" Unexpected ADK error: {e}")
                 raise
 
     try:
@@ -192,9 +192,9 @@ async def test_adk():
     except asyncio.TimeoutError:
         print(f"  ⏰ Timeout — {event_count} ADK events received")
         if event_count == 0:
-            print("  ❌ Zero events — check model name and credentials")
+            print("Zero events — check model name and credentials")
         else:
-            print("  ℹ️  Got events but no turn_complete yet — model still processing")
+            print("Got events but no turn_complete yet — model still processing")
 
     print(f"  Total ADK events: {event_count}")
 
