@@ -1,8 +1,9 @@
 /**
- * Voice Chatbot - Main JS
- * Now uses ADK runner on backend — events arrive as raw ADK Event JSON.
- * Mic → 16kHz s16le mono PCM binary → WebSocket → ADK runner → Gemini VAD
- * Gemini → ADK Event JSON → parse inputTranscription / outputTranscription / audio
+ * Voice Form Agent — Main JS
+ * - Answers tracked CLIENT-SIDE — never rely on agent to produce final JSON
+ * - Agent only asks questions; JS records every user reply in order
+ * - fileUpload questions: inline widget → /documents/upload → blob URL stored
+ * - Final JSON auto-triggered when all questions answered
  */
 
 const WS_BASE  = `ws://${location.host}`;
@@ -14,361 +15,600 @@ let userId      = null;
 let sessionId   = null;
 let isConnected = false;
 
-// Audio contexts — kept separate to avoid sample rate conflicts
-let playbackCtx  = null;   // 24kHz — for playing agent audio output
-let recordCtx    = null;   // 16kHz — for capturing mic input
+// Audio
+let playbackCtx  = null;
+let recordCtx    = null;
 let micStream    = null;
 let recorderNode = null;
 let playerNode   = null;
 let isRecording  = false;
 
-// Transcript bubble tracking — streaming partial updates
-// Input = user speech, Output = agent speech
-let currentInputBubble           = null;
-let currentInputBubbleId         = null;
-let currentOutputBubble          = null;
-let currentOutputBubbleId        = null;
-let inputTranscriptionFinished   = false;
+// Transcript streaming
+let currentInputBubble         = null;
+let currentInputBubbleId       = null;
+let currentOutputBubble        = null;
+let currentOutputBubbleId      = null;
+let inputTranscriptionFinished = false;
 
-// ── DOM refs ───────────────────────────────────────────────────────────────
+// Form / interview state
+let formSchema       = [];
+let flatQuestions    = [];   // ALL questions including fileUpload
+let answers          = [];   // ordered array of {question, answer} — built client-side
+let currentQIdx      = 0;    // which question we are currently on (0-based)
+let interviewStarted = false;
+let waitingForUpload = false;
+let completionShown  = false;
+
+// ── DOM refs ────────────────────────────────────────────────────────────────
 const chatBox   = document.getElementById("chat-box");
 const textInput = document.getElementById("text-input");
 const sendBtn   = document.getElementById("send-btn");
 const micBtn    = document.getElementById("mic-btn");
-const statusEl  = document.getElementById("status");
+const statusEl  = document.getElementById("ws-status");
 
-// ── Init ───────────────────────────────────────────────────────────────────
-async function init() {
+// ── Upload screen ────────────────────────────────────────────────────────────
+const jsonFileInput = document.getElementById("jsonFile");
+const processBtn    = document.getElementById("processBtn");
+const fileNameEl    = document.getElementById("file-name");
+const dropZone      = document.getElementById("drop-zone");
+
+jsonFileInput.addEventListener("change", () => {
+  const f = jsonFileInput.files[0];
+  if (f) { fileNameEl.textContent = `✓ ${f.name}`; processBtn.disabled = false; }
+});
+
+dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  const file = e.dataTransfer.files[0];
+  if (file && file.name.endsWith(".json")) {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    jsonFileInput.files = dt.files;
+    fileNameEl.textContent = `✓ ${file.name}`;
+    processBtn.disabled = false;
+  }
+});
+
+processBtn.addEventListener("click", () => {
+  const file = jsonFileInput.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      formSchema = JSON.parse(e.target.result);
+    } catch (err) {
+      alert("Invalid JSON file: " + err.message);
+      return;
+    }
+
+    flatQuestions = formSchema.reduce((acc, section) => {
+      const qs = section.questions.map(q => ({ ...q, sId: section.sId, sName: section.sName }));
+      return [...acc, ...qs];
+    }, []);
+
+    showMainScreen();
+    initSession();
+  };
+  reader.onerror = () => alert("Failed to read file.");
+  reader.readAsText(file);
+});
+
+// ── Show main screen ─────────────────────────────────────────────────────────
+function showMainScreen() {
+  document.getElementById("upload-screen").style.display = "none";
+  document.getElementById("main-screen").style.display = "flex";
+  renderForm();
+}
+
+// ── Reset ────────────────────────────────────────────────────────────────────
+document.getElementById("reset-btn").addEventListener("click", () => {
+  if (!confirm("Start over with a new form?")) return;
+  stopRecording();
+  if (ws) ws.close();
+  formSchema = []; flatQuestions = []; answers = [];
+  currentQIdx = 0; interviewStarted = false; waitingForUpload = false; completionShown = false;
+  chatBox.innerHTML = "";
+  document.getElementById("main-screen").style.display = "none";
+  document.getElementById("upload-screen").style.display = "flex";
+  processBtn.disabled = true;
+  processBtn.textContent = "Upload & Generate Form";
+  fileNameEl.textContent = "";
+  jsonFileInput.value = "";
+});
+
+// ── Form rendering (read-only reference) ─────────────────────────────────────
+function renderForm() {
+  const scroll = document.getElementById("form-scroll");
+  const nav    = document.getElementById("sections-nav");
+  scroll.innerHTML = "";
+  nav.innerHTML = "";
+
+  formSchema.forEach((section, idx) => {
+    const pill = document.createElement("button");
+    pill.className = "section-pill" + (idx === 0 ? " active" : "");
+    pill.textContent = section.sName;
+    pill.dataset.sid = section.sId;
+    pill.onclick = () => {
+      document.querySelectorAll(".section-pill").forEach(p => p.classList.remove("active"));
+      pill.classList.add("active");
+      document.querySelector(`.form-section[data-sid="${section.sId}"]`)
+        ?.scrollIntoView({ behavior: "smooth" });
+    };
+    nav.appendChild(pill);
+
+    const card = document.createElement("div");
+    card.className = "form-section";
+    card.dataset.sid = section.sId;
+    card.innerHTML = `
+      <div class="form-section-header">
+        <span class="section-dot"></span>
+        <span class="section-title-text">${section.sName}</span>
+      </div>
+    `;
+    const body = document.createElement("div");
+    body.className = "form-section-body";
+    section.questions.forEach(q => {
+      const wrap = document.createElement("div");
+      wrap.className = "form-field";
+      let extra = "";
+      if (q.type === "fileUpload") {
+        extra = `<div class="skipped-badge"><span>📎</span> PDF upload required</div>`;
+      } else if (q.options?.length) {
+        extra = `<div class="options-list">${q.options.map(o => `<span class="option-chip">${o}</span>`).join("")}</div>`;
+      }
+      wrap.innerHTML = `
+        <div class="form-field-label">
+          ${q.label}
+          ${q.required ? '<span class="required-star">*</span>' : ""}
+          <span class="field-type-badge">${q.type}</span>
+        </div>
+        ${extra}
+      `;
+      body.appendChild(wrap);
+    });
+    card.appendChild(body);
+    scroll.appendChild(card);
+  });
+}
+
+// ── Session + WebSocket ──────────────────────────────────────────────────────
+async function initSession() {
   setStatus("Connecting…", "gray");
   try {
     const res  = await fetch(`${API_BASE}/session`);
     const data = await res.json();
     userId    = data.user_id;
     sessionId = data.session_id;
-    console.log("[INIT] New session:", sessionId);
     connectWS();
   } catch (err) {
-    setStatus("❌ Failed to get session from server", "red");
-    console.error("[INIT] Session fetch error:", err);
+    setStatus("❌ Session error", "red");
   }
 }
 
-// ── WebSocket ──────────────────────────────────────────────────────────────
 function connectWS() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
-
   const url = `${WS_BASE}/ws/${userId}/${sessionId}?is_audio=true`;
-  console.log("[WS] Connecting to:", url);
-
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
 
   ws.onopen = () => {
     isConnected = true;
-    console.log("[WS] Connected ✅");
-    setStatus("✅ Connected — type a message or click 🎙️ Mic to speak", "green");
+    setStatus("✅ Connected", "green");
+    startInterview();
   };
 
   ws.onmessage = (e) => {
-    try {
-      const adkEvent = JSON.parse(e.data);
-      handleADKEvent(adkEvent);
-    } catch (err) {
-      console.error("[WS] Parse error:", err, e.data);
-    }
+    try { handleADKEvent(JSON.parse(e.data)); }
+    catch (err) { console.error("[WS] Parse error:", err); }
   };
 
-  ws.onerror = (err) => {
-    console.error("[WS] Error:", err);
-    setStatus("❌ WebSocket error — check server logs", "red");
-  };
-
+  ws.onerror = () => setStatus("❌ WebSocket error", "red");
   ws.onclose = (e) => {
     isConnected = false;
-    console.log("[WS] Closed:", e.code, e.reason);
-    setStatus(`🔌 Disconnected (${e.code}) — refresh to reconnect`, "gray");
+    setStatus(`🔌 Disconnected (${e.code})`, "gray");
     stopRecording();
   };
 }
 
 function sendWS(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
-  } else {
-    console.warn("[WS] Not connected, cannot send:", obj);
-    setStatus("⚠️ Not connected — refresh page", "red");
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// ── Interview flow ────────────────────────────────────────────────────────────
+function startInterview() {
+  if (interviewStarted || flatQuestions.length === 0) return;
+  interviewStarted = true;
+  currentQIdx = 0;
+
+  const questionList = flatQuestions.map((q, i) => {
+    const tag  = q.type === "fileUpload" ? " [FILE UPLOAD — PDF]" : "";
+    const opts = q.options?.length ? ` (options: ${q.options.join(", ")})` : "";
+    return `${i + 1}. ${q.label}${opts}${tag}`;
+  }).join("\n");
+
+  // Agent only needs to ASK questions — we handle all answer tracking & final JSON
+  const prompt = `You are conducting a structured form interview. You have ${flatQuestions.length} questions to ask.
+
+Rules:
+- Ask ONE question at a time in order.
+- After the user answers, say one brief acknowledgement sentence, then immediately ask the next question.
+- For questions marked [FILE UPLOAD — PDF]: ask the user to upload their PDF using the upload widget below. Then STOP — do NOT ask the next question. The system will notify you when the upload is done.
+- Do NOT produce a JSON summary at any point — the system handles data collection automatically.
+
+Questions:
+${questionList}
+
+Start: one short greeting sentence, then ask question 1.`;
+
+  sendWS({ type: "text", text: prompt });
+  setStatus("⏳ Agent starting…", "green");
+}
+
+// ── Record a user answer client-side ─────────────────────────────────────────
+function recordAnswer(answerText, isFileUpload = false) {
+  if (currentQIdx >= flatQuestions.length) return;
+  const q = flatQuestions[currentQIdx];
+
+  // Avoid double-recording (e.g. voice transcript + typed)
+  if (answers[currentQIdx] !== undefined) return;
+
+  // ground_truth = raw user speech/text; answer = will be cleaned by OutputRefinerAgent
+  // For fileUpload: both are the URL (no cleaning needed)
+  answers[currentQIdx] = {
+    question:     q.label,
+    answer:       answerText,   // will be replaced with cleaned value after refining
+    ground_truth: answerText    // always kept as-is
+  };
+  currentQIdx++;
+
+  console.log(`[ANSWER] Q${currentQIdx}: "${q.label}" → "${answerText}"`);
+  console.log(`[PROGRESS] ${Object.keys(answers).length} / ${flatQuestions.length}`);
+
+  checkCompletion();
+}
+
+// ── Check if all questions answered → show final JSON ────────────────────────
+async function checkCompletion() {
+  if (completionShown) return;
+  if (Object.keys(answers).length < flatQuestions.length) return;
+
+  completionShown = true;
+
+  const rawData = flatQuestions.map((q, i) => ({
+    question:     q.label,
+    answer:       answers[i]?.answer       ?? "",
+    ground_truth: answers[i]?.ground_truth ?? ""
+  }));
+
+  // Small delay so last agent acknowledgement renders first
+  setTimeout(async () => {
+    setStatus("✨ Refining answers…", "gray");
+    try {
+      const res = await fetch("/refine-answers", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ answers: rawData })
+      });
+      if (!res.ok) throw new Error(`Refiner error ${res.status}`);
+      const { refined } = await res.json();
+      showCompletion(refined);
+    } catch (err) {
+      console.error("[REFINER] Failed, showing raw answers:", err);
+      showCompletion(rawData);  // fallback to raw if refiner fails
+    }
+    setStatus("✅ Done", "green");
+  }, 800);
+}
+
+// ── File upload widget (inline in chat) ──────────────────────────────────────
+function injectFileUploadWidget(qIndex) {
+  const q = flatQuestions[qIndex];
+  if (!q || q.type !== "fileUpload") return;
+
+  // Don't inject twice for same question
+  if (document.getElementById(`widget-${q.controlName}`)) return;
+
+  waitingForUpload = true;
+  textInput.disabled   = true;
+  sendBtn.disabled     = true;
+  micBtn.disabled      = true;
+  textInput.placeholder = "Please upload the PDF file using the widget above…";
+
+  const widget = document.createElement("div");
+  widget.className = "file-upload-widget";
+  widget.id = `widget-${q.controlName}`;
+  widget.innerHTML = `
+    <label>📎 Upload PDF — ${q.label}</label>
+    <input type="file" accept="application/pdf" id="file-input-${q.controlName}" />
+    <button class="btn-upload-send" id="upload-btn-${q.controlName}" disabled>Upload File</button>
+    <div class="upload-status" id="upload-status-${q.controlName}">Select a PDF to upload…</div>
+  `;
+
+  const msgDiv = document.createElement("div");
+  msgDiv.className = "msg system";
+  msgDiv.appendChild(widget);
+  chatBox.appendChild(msgDiv);
+  scrollToBottom();
+
+  const fileInput = widget.querySelector(`#file-input-${q.controlName}`);
+  const uploadBtn = widget.querySelector(`#upload-btn-${q.controlName}`);
+  const statusDiv = widget.querySelector(`#upload-status-${q.controlName}`);
+
+  fileInput.addEventListener("change", () => {
+    uploadBtn.disabled = !fileInput.files[0];
+    if (fileInput.files[0]) statusDiv.textContent = `✓ ${fileInput.files[0].name} selected`;
+  });
+
+  uploadBtn.addEventListener("click", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    uploadBtn.disabled = true;
+    statusDiv.textContent = "Uploading…";
+
+    try {
+      const fd = new FormData();
+      fd.append("files", file);
+
+      const res = await fetch("/documents/upload", { method: "POST", body: fd });
+      if (!res.ok) throw new Error(`Upload failed (${res.status})`);
+
+      const data     = await res.json();
+      const blobUrl  = data.documents?.[0]?.document_url;
+      if (!blobUrl) throw new Error("No URL returned");
+
+      // Record answer client-side immediately — fileUpload: URL is both answer & ground_truth
+      recordAnswer(blobUrl, true);
+
+      statusDiv.textContent = "✅ Uploaded successfully";
+      statusDiv.className   = "upload-status success";
+      widget.classList.add("done");
+      fileInput.disabled    = true;
+
+      // Re-enable chat
+      waitingForUpload      = false;
+      textInput.disabled    = false;
+      sendBtn.disabled      = false;
+      micBtn.disabled       = false;
+      textInput.placeholder = "Type answer or press 🎙️ to speak…";
+
+      // Tell agent to continue
+      appendBubble("user", `📎 File uploaded: ${file.name}`, false);
+      sendWS({ type: "text", text: `File uploaded successfully (URL: ${blobUrl}). Please ask the next question.` });
+      setStatus("⏳ Agent continuing…", "green");
+
+    } catch (err) {
+      statusDiv.textContent = `❌ ${err.message}`;
+      statusDiv.className   = "upload-status error";
+      uploadBtn.disabled    = false;
+    }
+  });
+}
+
+// ── Detect when agent asks for a file upload ──────────────────────────────────
+let uploadWidgetInjected = {};  // track which q indices have been injected
+
+function checkForFileUploadTrigger(text) {
+  if (waitingForUpload) return;
+
+  // currentQIdx points to the next unanswered question
+  const q = flatQuestions[currentQIdx];
+  if (!q || q.type !== "fileUpload") return;
+  if (uploadWidgetInjected[currentQIdx]) return;
+
+  const keywords = ["upload", "pdf", "file", "document", "attach", "button below"];
+  const textLower = text.toLowerCase();
+  if (keywords.some(k => textLower.includes(k))) {
+    uploadWidgetInjected[currentQIdx] = true;
+    injectFileUploadWidget(currentQIdx);
   }
 }
 
-function handleADKEvent(adkEvent) {
-  console.log("[ADK]", JSON.stringify(adkEvent).slice(0, 120));
+// ── Completion overlay ────────────────────────────────────────────────────────
+function showCompletion(data) {
+  const pretty = JSON.stringify(data, null, 2);
+  document.getElementById("json-output").textContent = pretty;
+  document.getElementById("completion-overlay").classList.add("visible");
+}
 
-  // ── Turn complete ──────────────────────────────────────────────────────
+document.getElementById("copy-btn").addEventListener("click", () => {
+  const text = document.getElementById("json-output").textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    document.getElementById("copy-btn").textContent = "✓ Copied!";
+    setTimeout(() => document.getElementById("copy-btn").textContent = "📋 Copy JSON", 2000);
+  });
+});
+
+document.getElementById("download-btn").addEventListener("click", () => {
+  const text = document.getElementById("json-output").textContent;
+  const blob = new Blob([text], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "form-answers.json";
+  a.click();
+});
+
+document.getElementById("close-btn").addEventListener("click", () => {
+  document.getElementById("completion-overlay").classList.remove("visible");
+});
+
+// ── ADK Event handler ─────────────────────────────────────────────────────────
+function handleADKEvent(adkEvent) {
   if (adkEvent.turnComplete === true) {
-    // Finalize any still-open streaming bubbles
     finalizeInputTranscription();
     finalizeOutputTranscription();
-    inputTranscriptionFinished = false; // reset for next turn
-    setStatus("✅ Ready — type or speak", "green");
+    inputTranscriptionFinished = false;
+    if (!waitingForUpload) setStatus("✅ Ready — type or speak", "green");
     return;
   }
 
-  // ── Interrupted ────────────────────────────────────────────────────────
   if (adkEvent.interrupted === true) {
-    // Stop audio playback
-    if (playerNode) {
-      playerNode.port.postMessage({ command: "endOfAudio" });
-    }
+    if (playerNode) playerNode.port.postMessage({ command: "endOfAudio" });
     finalizeOutputTranscription();
     inputTranscriptionFinished = false;
-    appendSystemBubble("⚡ Response interrupted");
-    setStatus("✅ Ready — type or speak", "green");
+    appendSystemMsg("⚡ Response interrupted");
+    if (!waitingForUpload) setStatus("✅ Ready — type or speak", "green");
     return;
   }
 
-  // ── Input transcription (user's spoken words → text) ──────────────────
-  if (adkEvent.inputTranscription && adkEvent.inputTranscription.text) {
+  // User speech transcript
+  if (adkEvent.inputTranscription?.text) {
     const text       = adkEvent.inputTranscription.text;
     const isFinished = adkEvent.inputTranscription.finished === true;
-
-    // Ignore late partial transcriptions if we've already marked this turn done
     if (inputTranscriptionFinished) return;
 
     if (!currentInputBubbleId) {
-      // First chunk — create new user bubble
       currentInputBubbleId = randomId();
       currentInputBubble   = appendBubble("user", text, !isFinished);
       currentInputBubble.id = currentInputBubbleId;
-      currentInputBubble.classList.add("transcription");
     } else {
-      // Subsequent chunks
       const span = currentInputBubble.querySelector(".bubble-text");
       if (isFinished) {
-        // Final event sends the full complete text — replace entirely
         span.textContent = text;
         removeTypingIndicator(currentInputBubble);
       } else {
-        // Partial — append new words
-        span.textContent = span.textContent + text;
+        span.textContent += text;
       }
     }
 
     if (isFinished) {
+      // Record voice answer client-side
+      if (!waitingForUpload) recordAnswer(text);
       currentInputBubbleId = null;
       currentInputBubble   = null;
       inputTranscriptionFinished = true;
     }
-
     scrollToBottom();
     return;
   }
 
-  // ── Output transcription (agent's spoken words → text) ────────────────
-  if (adkEvent.outputTranscription && adkEvent.outputTranscription.text) {
+  // Agent speech transcript
+  if (adkEvent.outputTranscription?.text) {
     const text       = adkEvent.outputTranscription.text;
     const isFinished = adkEvent.outputTranscription.finished === true;
 
-    // When agent starts responding, close any open input transcription
-    if (currentInputBubbleId) {
-      finalizeInputTranscription();
-      inputTranscriptionFinished = true;
-    }
+    if (currentInputBubbleId) { finalizeInputTranscription(); inputTranscriptionFinished = true; }
 
     if (!currentOutputBubbleId) {
-      // Create new agent bubble for this transcript
       currentOutputBubbleId = randomId();
       currentOutputBubble   = appendBubble("assistant", text, !isFinished);
-      currentOutputBubble.id = currentOutputBubbleId;
-      currentOutputBubble.classList.add("transcription");
+      currentOutputBubble.id   = currentOutputBubbleId;
+      currentOutputBubble._raw = text;
     } else {
+      // finished=true → ADK resends the complete text, so replace (not append) to avoid doubling
+      currentOutputBubble._raw = isFinished ? text : (currentOutputBubble._raw || "") + text;
       const span = currentOutputBubble.querySelector(".bubble-text");
+      span.textContent = currentOutputBubble._raw;
       if (isFinished) {
-        span.textContent = text;
         removeTypingIndicator(currentOutputBubble);
-      } else {
-        span.textContent = span.textContent + text;
+        checkForFileUploadTrigger(currentOutputBubble._raw);
       }
     }
 
-    if (isFinished) {
-      currentOutputBubbleId = null;
-      currentOutputBubble   = null;
-    }
-
+    if (isFinished) { currentOutputBubbleId = null; currentOutputBubble = null; }
     scrollToBottom();
     return;
   }
 
-  // ── Content: audio chunks + text parts ────────────────────────────────
-  if (adkEvent.content && adkEvent.content.parts) {
-    // When agent starts sending content, finalize input transcription
-    if (currentInputBubbleId) {
-      finalizeInputTranscription();
-      inputTranscriptionFinished = true;
-    }
+  // Content parts: audio + text
+  if (adkEvent.content?.parts) {
+    if (currentInputBubbleId) { finalizeInputTranscription(); inputTranscriptionFinished = true; }
 
     for (const part of adkEvent.content.parts) {
-      // Play audio
-      if (part.inlineData && part.inlineData.mimeType &&
-          part.inlineData.mimeType.startsWith("audio/pcm")) {
-        playAudio(part.inlineData.data);
-      }
-
-      // Show text response (for text-mode or fallback)
+      if (part.inlineData?.mimeType?.startsWith("audio/pcm")) playAudio(part.inlineData.data);
       if (part.text) {
         appendBubble("assistant", part.text, false);
+        checkForFileUploadTrigger(part.text);
         scrollToBottom();
       }
     }
   }
 }
 
-// ── Transcript bubble helpers ──────────────────────────────────────────────
-function finalizeInputTranscription() {
-  if (currentInputBubble) {
-    removeTypingIndicator(currentInputBubble);
-    currentInputBubble   = null;
-    currentInputBubbleId = null;
-  }
-}
-
-function finalizeOutputTranscription() {
-  if (currentOutputBubble) {
-    removeTypingIndicator(currentOutputBubble);
-    currentOutputBubble   = null;
-    currentOutputBubbleId = null;
-  }
-}
-
-function removeTypingIndicator(bubbleWrapper) {
-  const indicator = bubbleWrapper.querySelector(".typing-indicator");
-  if (indicator) indicator.remove();
-}
-
-// ── Audio playback (agent → speaker) ──────────────────────────────────────
+// ── Audio playback ────────────────────────────────────────────────────────────
 async function initPlayback() {
   if (playbackCtx) return;
   playbackCtx = new AudioContext({ sampleRate: 24000 });
   await playbackCtx.audioWorklet.addModule("/static/js/pcm-player-processor.js");
   playerNode = new AudioWorkletNode(playbackCtx, "pcm-player-processor");
   playerNode.connect(playbackCtx.destination);
-  console.log("[AUDIO] Playback context ready at 24kHz");
 }
 
 async function playAudio(b64) {
   if (!playerNode) await initPlayback();
   try {
-    // Handle both standard base64 and base64url encoding
-    let standard = b64.replace(/-/g, "+").replace(/_/g, "/");
-    while (standard.length % 4) standard += "=";
-    const raw  = atob(standard);
-    const buf  = new ArrayBuffer(raw.length);
+    let s = b64.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const raw = atob(s);
+    const buf = new ArrayBuffer(raw.length);
     const view = new Uint8Array(buf);
     for (let i = 0; i < raw.length; i++) view[i] = raw.charCodeAt(i);
-    // pcm-player-processor expects Int16Array buffer
     playerNode.port.postMessage(buf, [buf]);
-  } catch (err) {
-    console.error("[AUDIO] Playback error:", err);
-  }
+  } catch (err) { console.error("[AUDIO]", err); }
 }
 
-// ── Audio recording (mic → Gemini via ADK) ────────────────────────────────
+// ── Mic recording ─────────────────────────────────────────────────────────────
 async function startRecording() {
-  if (isRecording) return;
-
+  if (isRecording || waitingForUpload) return;
   try {
     await initPlayback();
-    if (playbackCtx.state === "suspended") {
-      await playbackCtx.resume();
-    }
+    if (playbackCtx.state === "suspended") await playbackCtx.resume();
 
     micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
-    console.log("[MIC] Got mic stream");
 
-    // Separate 16kHz context for recording — Gemini needs 16kHz PCM mono
     recordCtx = new AudioContext({ sampleRate: 16000 });
     await recordCtx.audioWorklet.addModule("/static/js/pcm-recorder-processor.js");
-    console.log("[MIC] Record context ready at 16kHz");
 
     const micSource = recordCtx.createMediaStreamSource(micStream);
     recorderNode    = new AudioWorkletNode(recordCtx, "pcm-recorder-processor");
 
     recorderNode.port.onmessage = (e) => {
-      // FIX 1: Gate on isRecording — worklet keeps firing briefly after disconnect
       if (!isRecording) return;
-
-      // FIX 2: pcm-recorder-processor.js posts Float32Array (raw floats [-1,1])
-      // but Gemini/ADK expects Int16 PCM. Must convert or VAD sees garbage
-      // and never detects speech — causing mic to appear broken.
       const float32 = (e.data instanceof Float32Array) ? e.data : new Float32Array(e.data);
       const int16   = new Int16Array(float32.length);
       for (let i = 0; i < float32.length; i++) {
         const s  = Math.max(-1, Math.min(1, float32[i]));
         int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
-
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(int16.buffer);
-      }
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(int16.buffer);
     };
 
     micSource.connect(recorderNode);
-
     isRecording = true;
     micBtn.textContent = "⏹ Stop";
     micBtn.classList.add("recording");
-    setStatus("🎤 Speaking… ADK VAD will detect when you stop", "red");
-    console.log("[MIC] Recording started — ADK VAD handles turn detection");
-
+    setStatus("🎤 Speaking…", "red");
   } catch (err) {
-    console.error("[MIC] Error:", err);
-    appendSystemBubble(`❌ Mic error: ${err.message}`);
-    setStatus("❌ Mic error — check browser permissions", "red");
+    appendSystemMsg(`❌ Mic error: ${err.message}`);
+    setStatus("❌ Mic error", "red");
   }
 }
 
 function stopRecording() {
   if (!isRecording) return;
-  console.log("[MIC] Stopping recording");
-
-  if (recorderNode) {
-    try { recorderNode.disconnect(); } catch (_) {}
-    recorderNode = null;
-  }
-  if (recordCtx) {
-    try { recordCtx.close(); } catch (_) {}
-    recordCtx = null;
-  }
-  if (micStream) {
-    micStream.getTracks().forEach(t => t.stop());
-    micStream = null;
-  }
-
+  if (recorderNode) { try { recorderNode.disconnect(); } catch(_) {} recorderNode = null; }
+  if (recordCtx)    { try { recordCtx.close(); } catch(_) {} recordCtx = null; }
+  if (micStream)    { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   isRecording = false;
   micBtn.textContent = "🎙️ Mic";
   micBtn.classList.remove("recording");
-  setStatus("⏳ Processing… ADK VAD responding", "green");
-
-  // With ADK runner + VAD, we don't need to send end_of_turn.
-  // Optionally notify server for logging only — server ignores it.
+  setStatus("⏳ Processing…", "green");
   sendWS({ type: "end_of_turn" });
 }
 
-// ── UI helpers ─────────────────────────────────────────────────────────────
+// ── UI helpers ────────────────────────────────────────────────────────────────
 function appendBubble(role, text, isPartial) {
   const wrapper = document.createElement("div");
   wrapper.className = `msg ${role}`;
 
   const label = document.createElement("span");
   label.className = "label";
-  label.textContent = role === "user" ? "You" : role === "assistant" ? "Agent" : "System";
+  label.textContent = role === "user" ? "You" : "Agent";
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";
@@ -377,7 +617,6 @@ function appendBubble(role, text, isPartial) {
   textSpan.className = "bubble-text";
   textSpan.textContent = text;
 
-  // Typing indicator for partial streaming bubbles
   if (isPartial && role === "assistant") {
     const indicator = document.createElement("span");
     indicator.className = "typing-indicator";
@@ -392,36 +631,46 @@ function appendBubble(role, text, isPartial) {
   return wrapper;
 }
 
-function appendSystemBubble(text) {
+function appendSystemMsg(text) {
   const div = document.createElement("div");
   div.className = "msg system";
-  const bubble = document.createElement("div");
-  bubble.className = "bubble";
-  bubble.textContent = text;
-  div.appendChild(bubble);
+  const b = document.createElement("div");
+  b.className = "bubble";
+  b.textContent = text;
+  div.appendChild(b);
   chatBox.appendChild(div);
   scrollToBottom();
 }
 
-function scrollToBottom() {
-  chatBox.scrollTop = chatBox.scrollHeight;
+function finalizeInputTranscription() {
+  if (currentInputBubble) {
+    removeTypingIndicator(currentInputBubble);
+    currentInputBubble = null; currentInputBubbleId = null;
+  }
 }
+
+function finalizeOutputTranscription() {
+  if (currentOutputBubble) {
+    removeTypingIndicator(currentOutputBubble);
+    currentOutputBubble = null; currentOutputBubbleId = null;
+  }
+}
+
+function removeTypingIndicator(wrapper) { wrapper?.querySelector(".typing-indicator")?.remove(); }
+function scrollToBottom() { chatBox.scrollTop = chatBox.scrollHeight; }
+function randomId() { return Math.random().toString(36).substring(7); }
 
 function setStatus(msg, color) {
   statusEl.textContent = msg;
-  statusEl.style.color =
-    color === "green" ? "#22c55e" :
-    color === "red"   ? "#ef4444" : "#9ca3af";
+  statusEl.style.color = color === "green" ? "#22c55e" : color === "red" ? "#ef4444" : "#9ca3af";
 }
 
-function randomId() {
-  return Math.random().toString(36).substring(7);
-}
-
-// ── Event listeners ────────────────────────────────────────────────────────
+// ── Controls ──────────────────────────────────────────────────────────────────
 sendBtn.addEventListener("click", () => {
   const text = textInput.value.trim();
-  if (!text || !isConnected) return;
+  if (!text || !isConnected || waitingForUpload) return;
+  // Record answer client-side before sending
+  recordAnswer(text);
   appendBubble("user", text, false);
   sendWS({ type: "text", text });
   textInput.value = "";
@@ -429,16 +678,10 @@ sendBtn.addEventListener("click", () => {
 });
 
 textInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    sendBtn.click();
-  }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendBtn.click(); }
 });
 
 micBtn.addEventListener("click", async () => {
   if (isRecording) stopRecording();
   else await startRecording();
 });
-
-// ── Boot ───────────────────────────────────────────────────────────────────
-init();

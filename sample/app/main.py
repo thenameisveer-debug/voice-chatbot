@@ -14,12 +14,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import List
 
-from google.adk.agents import Agent
+from app.agents.agent import voice_agent
+from app.agents.output_refiner import OutputRefinerAgent
 from google.adk.agents.live_request_queue import LiveRequestQueue
+from app.api.file_upload import router as documents_router
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -35,7 +39,6 @@ LOCATION   = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 MODEL      = os.getenv("AGENT_MODEL", "gemini-live-2.5-flash-native-audio")
 USE_VERTEX = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "FALSE").upper() == "TRUE"
 
-# Set Vertex env var so ADK picks it up automatically
 if USE_VERTEX:
     os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
     os.environ["GOOGLE_CLOUD_PROJECT"]      = PROJECT
@@ -43,22 +46,11 @@ if USE_VERTEX:
 
 print(f"[INIT] Model: {MODEL} | Vertex: {USE_VERTEX} | Project: {PROJECT}")
 
-# ── ADK agent + runner (created once at startup) ───────────────────────────────
-SYSTEM_INSTRUCTION = (
-    "You are a friendly voice assistant. "
-    "Answer questions clearly and concisely. "
-    "Always respond in English only, regardless of what language the user speaks. "
-    "Keep responses short and conversational."
-)
-
-voice_agent = Agent(
-    name="voice_qa_agent",
-    model=MODEL,
-    instruction=SYSTEM_INSTRUCTION,
-)
-
 session_service = InMemorySessionService()
 runner = Runner(app_name=APP_NAME, agent=voice_agent, session_service=session_service)
+
+# ── OutputRefinerAgent singleton ──────────────────────────────────────────────
+output_refiner = OutputRefinerAgent()
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="Voice Chatbot")
@@ -66,10 +58,9 @@ app = FastAPI(title="Voice Chatbot")
 static_path = Path(__file__).parent / "static"
 static_path.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+app.include_router(documents_router)
 
-# ── RunConfig for native audio model ──────────────────────────────────────────
-# Native audio models ONLY support AUDIO response modality.
-# ADK's built-in VAD handles when to respond — no manual turn signaling needed.
+# ── RunConfig ─────────────────────────────────────────────────────────────────
 RUN_CONFIG = RunConfig(
     streaming_mode=StreamingMode.BIDI,
     response_modalities=["AUDIO"],
@@ -83,6 +74,21 @@ RUN_CONFIG = RunConfig(
     ),
 )
 
+# ── Refine answers endpoint ───────────────────────────────────────────────────
+class AnswerItem(BaseModel):
+    question: str
+    answer: str
+    ground_truth: str
+
+class RefineRequest(BaseModel):
+    answers: List[AnswerItem]
+
+@app.post("/refine-answers")
+async def refine_answers(request: RefineRequest):
+    raw = [item.model_dump() for item in request.answers]
+    refined = await output_refiner.refine(raw)
+    return JSONResponse(content={"refined": refined})
+
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
 @app.websocket("/ws/{user_id}/{session_id}")
@@ -95,7 +101,6 @@ async def websocket_endpoint(
     await websocket.accept()
     print(f"\n[WS] Connected: user={user_id[:8]}...")
 
-    # Create a fresh ADK session for this connection
     session = await session_service.get_session(
         app_name=APP_NAME, user_id=user_id, session_id=session_id
     )
@@ -106,14 +111,12 @@ async def websocket_endpoint(
 
     live_queue = LiveRequestQueue()
 
-    # ── Upstream: browser → ADK ───────────────────────────────────────────
     async def upstream_task():
         audio_chunks = 0
         try:
             while True:
                 message = await websocket.receive()
 
-                # Binary frame = raw PCM audio from mic
                 if "bytes" in message and message["bytes"]:
                     audio_chunks += 1
                     if audio_chunks % 50 == 1:
@@ -122,10 +125,8 @@ async def websocket_endpoint(
                         mime_type="audio/pcm;rate=16000",
                         data=message["bytes"],
                     )
-                    # send_realtime lets ADK's VAD decide when to respond
                     live_queue.send_realtime(audio_blob)
 
-                # Text frame = JSON from browser
                 elif "text" in message and message["text"]:
                     data = json.loads(message["text"])
                     msg_type = data.get("type")
@@ -139,10 +140,7 @@ async def websocket_endpoint(
                         live_queue.send_content(content)
 
                     elif msg_type == "end_of_turn":
-                        # With ADK runner + VAD, we don't need to do anything special here.
-                        # The VAD detects silence and responds automatically.
-                        # But we log it for debugging visibility.
-                        print(f"[UP] end_of_turn received (ADK VAD handles this automatically, {audio_chunks} chunks sent)")
+                        print(f"[UP] end_of_turn received ({audio_chunks} chunks sent)")
 
         except WebSocketDisconnect:
             print(f"[UP] Client disconnected")
@@ -151,7 +149,6 @@ async def websocket_endpoint(
         finally:
             live_queue.close()
 
-    # ── Downstream: ADK → browser ─────────────────────────────────────────
     async def downstream_task():
         event_count = 0
         try:
@@ -162,18 +159,8 @@ async def websocket_endpoint(
                 run_config=RUN_CONFIG,
             ):
                 event_count += 1
-
-                # Serialize the ADK Event to JSON and send raw to browser.
-                # The browser's app.js parses ADK Event fields directly:
-                #   event.inputTranscription.text  → user speech transcript
-                #   event.outputTranscription.text → agent speech transcript
-                #   event.content.parts[].inlineData → audio bytes (base64)
-                #   event.content.parts[].text      → text response
-                #   event.turnComplete              → turn done
-                #   event.interrupted               → agent was interrupted
                 event_json = event.model_dump_json(exclude_none=True, by_alias=True)
 
-                # Log non-audio events to server console
                 event_dict = json.loads(event_json)
                 if event_dict.get("turnComplete"):
                     print(f"[DOWN] ✅ Turn complete (event #{event_count})")
@@ -185,14 +172,6 @@ async def websocket_endpoint(
                 elif event_dict.get("outputTranscription"):
                     t = event_dict["outputTranscription"]
                     print(f"[DOWN] Agent transcript: '{t.get('text','')}' finished={t.get('finished')}")
-                elif event_dict.get("content"):
-                    parts = event_dict["content"].get("parts", [])
-                    for p in parts:
-                        if p.get("text"):
-                            print(f"[DOWN] Text: {p['text'][:80]}")
-                        if p.get("inlineData"):
-                            size = len(p["inlineData"].get("data", "")) * 3 // 4
-                            print(f"[DOWN] Audio: ~{size} bytes")
 
                 await websocket.send_text(event_json)
 
@@ -200,7 +179,6 @@ async def websocket_endpoint(
             print(f"[DOWN] Client disconnected after {event_count} events")
         except Exception as e:
             err_str = str(e)
-            # ADK raises APIError 1000 on normal WS close — safe to ignore
             if "1000" in err_str:
                 print(f"[DOWN] Session closed normally after {event_count} events")
             else:
@@ -233,5 +211,4 @@ async def index():
 
 @app.get("/session")
 async def new_session():
-    """Generate fresh session & user IDs for the client."""
     return {"user_id": str(uuid.uuid4()), "session_id": str(uuid.uuid4())}

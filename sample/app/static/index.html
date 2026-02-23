@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Voice Chatbot — Google ADK</title>
+  <title>Voice Form Agent — Google ADK</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -12,43 +12,387 @@
       background: #0f172a;
       color: #e2e8f0;
       height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Upload Screen ─────────────────────────────────── */
+    #upload-screen {
+      flex: 1;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
+      gap: 28px;
+      padding: 40px;
     }
 
-    #app {
-      width: 100%;
-      max-width: 700px;
-      height: 90vh;
+    .upload-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 48px 56px;
       display: flex;
       flex-direction: column;
-      border: 1px solid #1e293b;
-      border-radius: 12px;
-      overflow: hidden;
-      background: #1e293b;
+      align-items: center;
+      gap: 24px;
+      max-width: 480px;
+      width: 100%;
     }
 
-    header {
-      padding: 14px 20px;
+    .upload-icon { font-size: 3rem; }
+
+    .upload-card h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #f1f5f9;
+      text-align: center;
+    }
+
+    .upload-card p {
+      color: #94a3b8;
+      font-size: 0.92rem;
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    .file-drop-zone {
+      width: 100%;
+      border: 2px dashed #334155;
+      border-radius: 12px;
+      padding: 32px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+    }
+
+    .file-drop-zone:hover,
+    .file-drop-zone.dragover {
+      border-color: #6366f1;
+      background: rgba(99,102,241,0.05);
+    }
+
+    .file-drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    .file-drop-zone .drop-label {
+      color: #64748b;
+      font-size: 0.88rem;
+    }
+
+    .file-drop-zone .drop-label span {
+      color: #6366f1;
+      font-weight: 600;
+    }
+
+    #file-name {
+      font-size: 0.82rem;
+      color: #22c55e;
+      margin-top: 8px;
+      min-height: 18px;
+    }
+
+    .btn-primary {
+      background: #6366f1;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 13px 32px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      width: 100%;
+    }
+
+    .btn-primary:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); }
+    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    /* ── Main Screen (split) ───────────────────────────── */
+    #main-screen {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Top bar */
+    #topbar {
       background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+      padding: 10px 20px;
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    #topbar h1 { font-size: 1rem; font-weight: 600; }
+    #topbar h1 span { color: #6366f1; }
+
+    .topbar-right { display: flex; align-items: center; gap: 12px; }
+
+    #ws-status { font-size: 0.78rem; color: #22c55e; }
+
+    .btn-sm {
+      background: #334155;
+      color: #e2e8f0;
+      border: none;
+      border-radius: 7px;
+      padding: 7px 14px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-sm:hover { background: #475569; }
+    .btn-sm.success { background: #059669; color: #fff; }
+
+    /* Section nav */
+    #sections-nav {
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+      padding: 8px 20px;
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      flex-shrink: 0;
+    }
+    #sections-nav::-webkit-scrollbar { height: 3px; }
+    #sections-nav::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+    .section-pill {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #94a3b8;
+      border-radius: 20px;
+      padding: 5px 14px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s;
+      flex-shrink: 0;
+    }
+    .section-pill:hover { border-color: #6366f1; color: #e2e8f0; }
+    .section-pill.active { background: #6366f1; border-color: #6366f1; color: #fff; }
+    .section-pill.completed { border-color: #22c55e; color: #22c55e; }
+
+    /* Split pane */
+    #split-pane {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* ── Form Panel ─── */
+    #form-panel {
+      width: 50%;
+      border-right: 1px solid #1e293b;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #form-panel-header {
+      padding: 12px 20px;
+      background: #1e293b;
+      font-size: 0.82rem;
+      color: #64748b;
+      border-bottom: 1px solid #0f172a;
+      flex-shrink: 0;
+    }
+
+    #form-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    #form-scroll::-webkit-scrollbar { width: 4px; }
+    #form-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+    .form-section {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .form-section.active-section { border-color: #6366f1; }
+
+    .form-section-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: #0f172a;
       border-bottom: 1px solid #334155;
     }
 
-    header h1 { font-size: 1.1rem; font-weight: 600; }
-    header h1 span { color: #6366f1; }
-    #status { font-size: 0.78rem; color: #22c55e; }
+    .section-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #334155;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+    .active-section .section-dot { background: #6366f1; }
+    .completed-section .section-dot { background: #22c55e; }
 
-    #toolbar {
-      padding: 6px 16px;
+    .section-title-text { font-size: 0.88rem; font-weight: 600; color: #e2e8f0; }
+
+    .form-section-body { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+
+    .form-field { display: flex; flex-direction: column; gap: 6px; }
+
+    .form-field-label {
+      font-size: 0.82rem;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .required-star { color: #ef4444; font-weight: 700; }
+
+    .field-type-badge {
+      font-size: 0.68rem;
       background: #0f172a;
-      font-size: 0.75rem;
       color: #475569;
-      border-bottom: 1px solid #1e293b;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid #1e293b;
+    }
+
+    .form-field-input {
+      background: #0f172a;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 0.88rem;
+      width: 100%;
+      outline: none;
+      transition: border-color 0.15s;
+      resize: vertical;
+    }
+    .form-field-input:focus { border-color: #6366f1; }
+    .form-field-input.answered { border-color: #22c55e; }
+
+    select.form-field-input option { background: #1e293b; }
+
+    .radio-group { display: flex; gap: 12px; flex-wrap: wrap; }
+    .radio-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-size: 0.88rem;
+      color: #94a3b8;
+      padding: 7px 12px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      transition: all 0.15s;
+    }
+    .radio-item:has(input:checked) {
+      border-color: #6366f1;
+      background: rgba(99,102,241,0.1);
+      color: #e2e8f0;
+    }
+    .radio-item input { accent-color: #6366f1; }
+
+    .skipped-badge {
+      font-size: 0.8rem;
+      color: #475569;
+      background: #0f172a;
+      border: 1px dashed #334155;
+      border-radius: 8px;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Currently-active question highlight */
+    .form-field.current-question .form-field-input,
+    .form-field.current-question .radio-group {
+      position: relative;
+    }
+    .form-field.current-question::before {
+      content: "← Current";
+      font-size: 0.68rem;
+      color: #6366f1;
+      font-weight: 600;
+    }
+
+    /* Export bar */
+    #export-bar {
+      padding: 12px 20px;
+      background: #0f172a;
+      border-top: 1px solid #1e293b;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    #progress-text { font-size: 0.78rem; color: #64748b; }
+
+    #progress-bar-wrap {
+      flex: 1;
+      height: 4px;
+      background: #1e293b;
+      border-radius: 4px;
+      margin: 0 12px;
+      overflow: hidden;
+    }
+    #progress-bar-fill {
+      height: 100%;
+      background: #6366f1;
+      border-radius: 4px;
+      transition: width 0.3s;
+      width: 0%;
+    }
+
+    .btn-export {
+      background: #059669;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 18px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      display: none;
+    }
+    .btn-export:hover { opacity: 0.85; }
+    .btn-export.visible { display: block; }
+
+    /* ── Chat Panel ─── */
+    #chat-panel {
+      width: 50%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #chat-panel-header {
+      padding: 12px 20px;
+      background: #1e293b;
+      font-size: 0.82rem;
+      color: #64748b;
+      border-bottom: 1px solid #0f172a;
+      flex-shrink: 0;
     }
 
     #chat-box {
@@ -59,37 +403,33 @@
       flex-direction: column;
       gap: 10px;
     }
-
     #chat-box::-webkit-scrollbar { width: 4px; }
     #chat-box::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
 
-    .msg { display: flex; flex-direction: column; max-width: 80%; }
+    .msg { display: flex; flex-direction: column; max-width: 85%; }
     .msg.user      { align-self: flex-end;   align-items: flex-end; }
     .msg.assistant { align-self: flex-start; align-items: flex-start; }
     .msg.system    { align-self: center;     align-items: center; }
 
-    .label { font-size: 0.7rem; color: #64748b; margin-bottom: 3px; }
+    .label { font-size: 0.68rem; color: #64748b; margin-bottom: 2px; }
 
     .bubble {
-      padding: 10px 14px;
+      padding: 9px 13px;
       border-radius: 12px;
-      font-size: 0.92rem;
+      font-size: 0.88rem;
       line-height: 1.5;
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .msg.user .bubble { background: #6366f1; color: #fff; border-bottom-right-radius: 4px; }
+    .msg.assistant .bubble { background: #334155; color: #e2e8f0; border-bottom-left-radius: 4px; }
+    .msg.system .bubble { background: transparent; color: #475569; font-size: 0.76rem; font-style: italic; }
 
-    .msg.user .bubble {
-      background: #6366f1; color: #fff;
-      border-bottom-right-radius: 4px;
-    }
-    .msg.assistant .bubble {
-      background: #334155; color: #e2e8f0;
-      border-bottom-left-radius: 4px;
-    }
-    .msg.system .bubble {
-      background: transparent; color: #64748b;
-      font-size: 0.78rem; font-style: italic;
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    .typing-indicator::after {
+      content: "▌";
+      animation: blink 0.9s infinite;
+      color: #6366f1;
     }
 
     #controls {
@@ -99,6 +439,7 @@
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-shrink: 0;
     }
 
     #text-input {
@@ -106,46 +447,203 @@
       background: #1e293b;
       border: 1px solid #334155;
       color: #e2e8f0;
-      padding: 10px 14px;
+      padding: 9px 13px;
       border-radius: 8px;
-      font-size: 0.92rem;
+      font-size: 0.88rem;
       outline: none;
     }
     #text-input:focus { border-color: #6366f1; }
 
-    button {
-      padding: 10px 16px;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 0.88rem;
-      font-weight: 500;
-      transition: opacity 0.15s;
-    }
-    button:hover { opacity: 0.85; }
+    #send-btn { background: #6366f1; color: #fff; border: none; border-radius: 8px; padding: 9px 16px; cursor: pointer; font-size: 0.88rem; font-weight: 500; transition: opacity 0.15s; }
+    #send-btn:hover { opacity: 0.85; }
 
-    #send-btn { background: #6366f1; color: #fff; }
-    #mic-btn  { background: #10b981; color: #fff; }
+    #mic-btn { background: #10b981; color: #fff; border: none; border-radius: 8px; padding: 9px 14px; cursor: pointer; font-size: 0.88rem; transition: opacity 0.15s; }
+    #mic-btn:hover { opacity: 0.85; }
     #mic-btn.recording { background: #ef4444; }
+
+    /* ── File upload widget (inline in chat) ─── */
+    .file-upload-widget {
+      margin-top: 8px;
+      background: #0f172a;
+      border: 1px dashed #475569;
+      border-radius: 10px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-width: 320px;
+    }
+    .file-upload-widget.done {
+      border-color: #22c55e;
+      border-style: solid;
+    }
+    .file-upload-widget label {
+      font-size: 0.8rem;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .file-upload-widget input[type="file"] {
+      font-size: 0.78rem;
+      color: #94a3b8;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      width: 100%;
+    }
+    .file-upload-widget input[type="file"]::-webkit-file-upload-button {
+      background: #334155;
+      color: #e2e8f0;
+      border: none;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+    .btn-upload-send {
+      background: #6366f1;
+      color: #fff;
+      border: none;
+      border-radius: 7px;
+      padding: 8px 14px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      align-self: flex-start;
+    }
+    .btn-upload-send:hover:not(:disabled) { opacity: 0.85; }
+    .btn-upload-send:disabled { opacity: 0.4; cursor: not-allowed; }
+    .upload-status {
+      font-size: 0.75rem;
+      color: #64748b;
+      min-height: 16px;
+    }
+    .upload-status.success { color: #22c55e; }
+    .upload-status.error   { color: #ef4444; }
+
+    /* ── Completion overlay ─── */
+    #completion-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    #completion-overlay.visible { display: flex; }
+
+    .completion-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 40px;
+      max-width: 520px;
+      width: 90%;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .completion-card h2 { font-size: 1.3rem; color: #22c55e; }
+    .completion-card p { color: #94a3b8; font-size: 0.9rem; }
+
+    #json-output {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 14px;
+      font-family: monospace;
+      font-size: 0.78rem;
+      color: #a5f3fc;
+      white-space: pre;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    .completion-btns { display: flex; gap: 10px; }
+    .completion-btns button {
+      flex: 1;
+      padding: 11px;
+      border: none;
+      border-radius: 9px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #copy-btn { background: #6366f1; color: #fff; }
+    #download-btn { background: #059669; color: #fff; }
+    #close-btn { background: #334155; color: #e2e8f0; }
   </style>
 </head>
 <body>
-  <div id="app">
-    <header>
-      <h1>🎙️ Voice Chatbot <span>ADK</span></h1>
-      <span id="status">Connecting…</span>
-    </header>
 
-    <div id="toolbar">
-      English-only · Gemini Live Native Audio · Type or speak freely
+  <!-- ── Upload Screen ───────────────────────────────── -->
+  <div id="upload-screen">
+    <div class="upload-card">
+      <div class="upload-icon">📋</div>
+      <h1>Voice Form Agent</h1>
+      <p>Upload a JSON schema to start an AI-guided voice interview. The agent will ask each question and fill the form as you answer.</p>
+
+      <div class="file-drop-zone" id="drop-zone">
+        <input type="file" id="jsonFile" accept=".json" />
+        <div class="drop-label">
+          <div style="font-size:1.5rem;margin-bottom:8px">📁</div>
+          <div>Drop your JSON file here or <span>browse</span></div>
+        </div>
+      </div>
+      <div id="file-name"></div>
+
+      <button class="btn-primary" id="processBtn" disabled>Upload & Generate Form</button>
+    </div>
+  </div>
+
+  <!-- ── Main Screen ─────────────────────────────────── -->
+  <div id="main-screen">
+    <div id="topbar">
+      <h1>🎙️ Voice Form Agent <span>ADK</span></h1>
+      <div class="topbar-right">
+        <span id="ws-status">Connecting…</span>
+        <button class="btn-sm" id="reset-btn">↩ New Form</button>
+      </div>
     </div>
 
-    <div id="chat-box"></div>
+    <div id="sections-nav"></div>
 
-    <div id="controls">
-      <input id="text-input" type="text" placeholder="Type a message and press Enter…" autocomplete="off" />
-      <button id="send-btn">Send</button>
-      <button id="mic-btn">🎙️ Mic</button>
+    <div id="split-pane">
+      <!-- Left: Form -->
+      <div id="form-panel">
+        <div id="form-panel-header">📝 Form — answers auto-fill as you chat</div>
+        <div id="form-scroll"></div>
+
+      </div>
+
+      <!-- Right: Chat -->
+      <div id="chat-panel">
+        <div id="chat-panel-header">🤖 Agent — ask questions here</div>
+        <div id="chat-box"></div>
+        <div id="controls">
+          <input id="text-input" type="text" placeholder="Type answer or press 🎙️ to speak…" autocomplete="off" />
+          <button id="send-btn">Send</button>
+          <button id="mic-btn">🎙️ Mic</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Completion overlay ──────────────────────────── -->
+  <div id="completion-overlay">
+    <div class="completion-card">
+      <h2> Interview Complete!</h2>
+      <p>All questions answered. Here's your collected data:</p>
+      <pre id="json-output"></pre>
+      <div class="completion-btns">
+        <button id="copy-btn">Copy JSON</button>
+        <button id="download-btn"> Download</button>
+        <button id="close-btn">✕ Close</button>
+      </div>
     </div>
   </div>
 
