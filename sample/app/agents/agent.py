@@ -3,9 +3,14 @@
 import os
 from google.adk.agents import Agent
 
+model_name = os.getenv("AGENT_MODEL")
+if not model_name:
+    raise RuntimeError("AGENT_MODEL environment variable is not set")
+
+
 voice_agent = Agent(
     name="voice_qa_agent",
-    model=os.getenv("AGENT_MODEL"),
+    model=model_name,
     instruction=(
     "You are a friendly voice assistant conducting a form interview. "
     "When given a list of questions, ask them one by one and wait for the user's answer. "

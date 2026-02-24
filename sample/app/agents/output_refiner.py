@@ -38,7 +38,7 @@ def clean_form_answers(raw_json: str) -> str:
 
 # ── Agent instruction ─────────────────────────────────────────────────────────
 
-_INSTRUCTION = """\
+_INSTRUCTION = """
 You are a form answer cleaner agent.
 
 You receive a JSON array where each item has:
@@ -93,12 +93,12 @@ Special rules:
 ═══ EXAMPLES ═══
 Input item:
   {"question": "Please provide the full name of the institution.",
-   "answer": "The full name of the institution is Zebia.",
-   "ground_truth": "The full name of the institution is Zebia."}
+   "answer": "The full name of the institution is xebia.",
+   "ground_truth": "The full name of the institution is xebia."}
 Output item:
   {"question": "Please provide the full name of the institution.",
-   "answer": "Zebia",
-   "ground_truth": "The full name of the institution is Zebia."}
+   "answer": "xebia",
+   "ground_truth": "The full name of the institution is xebia."}
 
 Input item:
   {"question": "Select the type of institution.",

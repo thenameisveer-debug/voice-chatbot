@@ -14,7 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -163,9 +163,9 @@ async def websocket_endpoint(
 
                 event_dict = json.loads(event_json)
                 if event_dict.get("turnComplete"):
-                    print(f"[DOWN] ✅ Turn complete (event #{event_count})")
+                    print(f"[DOWN] Turn complete (event #{event_count})")
                 elif event_dict.get("interrupted"):
-                    print(f"[DOWN] ⚡ Interrupted")
+                    print(f"[DOWN]  Interrupted")
                 elif event_dict.get("inputTranscription"):
                     t = event_dict["inputTranscription"]
                     print(f"[DOWN] User transcript: '{t.get('text','')}' finished={t.get('finished')}")
